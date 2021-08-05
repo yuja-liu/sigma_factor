@@ -2,6 +2,7 @@ using Catalyst, Plots, StochasticDiffEq, DiffEqJump, Latexify
 using DifferentialEquations
 using Random
 using Statistics
+using FFTW
 
 #Random.seed!(7777)
 
@@ -10,30 +11,44 @@ using Statistics
 ###############
 "duo-input Hill function. X and Y are the
 activational and repressional inputs respectively"
-duo_input_hill(X, Y, S, D, n) = 
-    (S * X)^n / ((S * X)^n + (D * Y)^n + 1)
+duo_input_hill(X, Y, KS, KD, n) = 
+    (X / KS)^n / ((X / KS)^n + (Y / KD + 1)^n)
 
 "Generate the general sigma factor model reactions"
 function reaction_system(; _δ = 1)
     # model definition
     sigma_model = @reaction_network begin
         1/τ₁ * β * v₀, ∅ --> σ
-        1/τ₁ * β * duo_input_hill(σ, A, S, D, n), ∅ --> σ
+        1/τ₁ * β * duo_input_hill(σ, A, KS, KD, n), ∅ --> σ
         1/τ₁, σ --> ∅
         1/τ₂ * σ, ∅ --> A
         1/τ₂, A --> ∅
-    end v₀ β S D n τ₁ τ₂ η    # η is for SDE only
+    end v₀ β KS KD n τ₁ τ₂ η    # η is for SDE only
     
     # if δ is specified, change the step size
     if(_δ > 1)
         # modify the stoich of σ prod
-        @parameters t β S D n τ₁
+        @parameters t β KS KD n τ₁
         @variables σ(t) A(t)
         ## the A prod eqn
         sigma_model.eqs[2] = 
-            Reaction(1/τ₁ * β * duo_input_hill(σ, A, S, D, n), nothing, [σ], nothing, [_δ])
+            Reaction(1/τ₁ * β * duo_input_hill(σ, A, KS, KD, n), nothing, [σ], nothing, [_δ])
         println("burst size δ = ", _δ)
     end
+    
+    return sigma_model
+end
+
+function new_reaction_system()
+    # model definition
+    sigma_model = @reaction_network begin
+        1/τ₁ * β * v₀, ∅ --> σ
+        1/τ₁ * β * duo_input_hill(σ, A, KS, KD, n), ∅ --> σ
+        1/τ₁, σ --> ∅
+        1/τ₂ * β * v₀, ∅ --> A
+        1/τ₂ * β * duo_input_hill(σ, A, KS, KD, n), ∅ --> A
+        1/τ₂, A --> ∅
+    end v₀ β KS KD n τ₁ τ₂ η    # η is for SDE only
     
     return sigma_model
 end
@@ -53,8 +68,12 @@ function interpret_sol(sol)
     return t_vec, σ_vec, A_vec
 end
 
+###############
+# plotting
+###############
 "plot time course of the simulation"
-function plot_timecourse(sol, stress_t; max_t = 2000., show_vars = [1, 2])
+function plot_timecourse(sol, stress_t; max_t = 2000., show_vars = [1, 2],
+    labels = ["σ(t)" "A(t)"])
     t, σ, A = interpret_sol(sol)
     traj = [σ A]
     if maximum(sol.t) > max_t
@@ -65,17 +84,18 @@ function plot_timecourse(sol, stress_t; max_t = 2000., show_vars = [1, 2])
     plt = plot(t, traj[:, show_vars],
         ylabel = "# molecules",
         title = "Time course",
-        labels = ["σ(t)" "A(t)"][show_vars],
+        # for some reason, labels has to be a row vector
+        labels = labels[show_vars'],
         alpha = 0.7)
     
     plot!(plt, [stress_t], seriestype = "vline", color = "red", 
         linestyle = :dash, labels = "Adding stress")
+    if max_t > 5000
+        plot!(size = (1200, 400))
+    end
     return plt
 end
 
-###############
-# plotting
-###############
 # TODO: do we want to normalize σ and A?    probably no
 "plot phase plane"
 function plot_phase_plane(sol; max_t = 2000.0)
@@ -101,10 +121,10 @@ function plot_phase_plane(sol; max_t = 2000.0)
 end
 
 "plot the hill function value"
-function plot_hill(sol, _S, _D, _n)
+function plot_hill(sol, _KS, _KD, _n)
     t_vec, σ_vec, A_vec = interpret_sol(sol)
     
-    hill_vec = [duo_input_hill(x, y, _S, _D, _n) for (x, y) = zip(σ_vec, A_vec)]
+    hill_vec = [duo_input_hill(x, y, _KS, _KD, _n) for (x, y) = zip(σ_vec, A_vec)]
     plt = plot(t_vec, hill_vec, title = "Hill function", legend = false)
     
     return plt
@@ -134,7 +154,7 @@ function simu_all(_m; _v₀ = 0.01, _β = 100., _KS = 0.2, _rK = 1.,
 
     # parameters, v₀ β S D n τ₁ τ₂ η
     # S is initially set to 0 and subject to a step change
-    p = [_v₀, _β, 1 / _KS, 1 / (_rK * _KS), _n, _τ₁, _τ₁ * _rτ, _η]
+    p = [_v₀, _β, _KS, _rK * _KS, _n, _τ₁, _τ₁ * _rτ, _η]
     
     # choose different methods
     if method == "ssa"
@@ -163,7 +183,7 @@ function simu_all(_m; _v₀ = 0.01, _β = 100., _KS = 0.2, _rK = 1.,
             display(plot_phase_plane(sol))    # phase plane
         end
         if show_hill
-            display(plot_hill(sol, 1 / _KS, 1 / (_rK * _KS), _n))
+            display(plot_hill(sol, _KS, _rK * _KS, _n))
         end
     end
     
@@ -172,23 +192,37 @@ function simu_all(_m; _v₀ = 0.01, _β = 100., _KS = 0.2, _rK = 1.,
 end
 
 "Call back to add stress"
-function S_step(step_time, step_value)
+function S_step(step_time, step_value, p_idx)
     # in solve, must use tstops to specify the break point
     condition(u, t, integrator) = (t == step_time)
-    affect!(integrator) = integrator.p[3] += step_value    # S
+
+    function affect!(integrator)
+        if length(p_idx) == 1
+            integrator.p[p_idx] += step_value    # D
+        else
+            integrator.p[p_idx] .+= step_value
+        end
+    end
+#     affect!(integrator) = integrator.p[p_idx] += step_value    # D
     return DiscreteCallback(condition, affect!, save_positions = (true,true))
 end
 
 "simulate with Gillespie"
-function simu_ssa(_m, tspan, u₀, p, stress_t; _saveat = 1.)
-    _S = p[3]    # save S value
-    p[3] = 0.    # initially set S = 0
+function simu_ssa(_m, tspan, u₀, p, stress_t; _saveat = 1., dual = true)
+    # dangerous! the index for KD is fixed!
+    p_idx = dual ? [5, 7] : 4    # index of KD in p
+    _KD = p[p_idx]
+    if dual
+        p[p_idx] .= 1e-16
+    else
+        p[p_idx] = 1e-16
+    end
     
     # Gillespie
     dprob = DiscreteProblem(_m, u₀, tspan, p)
     jprob = JumpProblem(_m, dprob, Direct(), save_positions = (false, false))
     jsol = solve(jprob, SSAStepper(),
-        callback = S_step(stress_t, _S),
+        callback = S_step(stress_t, _KD, p_idx),
         tstops = [stress_t],
         saveat = _saveat)
     return jsol
@@ -288,11 +322,16 @@ function plot_vf(dσdt, dAdt; scale = 1.0, interval = 5, adaptive = true)
     # make the matrix sparse
     dσdt = dσdt[1:interval:σ_size, 1:interval:A_size]
     dAdt = dAdt[1:interval:σ_size, 1:interval:A_size]
+    # normalize
+    magnitude = sqrt.(dσdt.^2 .+ dAdt.^2)
+    dσdt = dσdt ./ magnitude
+    dAdt = dAdt ./ magnitude
     # plot
     σ_grid = ((1:interval:σ_size) .- 1) * ones(1, Int64(ceil(A_size/interval)) )
     A_grid = ones(Int64(ceil(σ_size/interval)), 1) * ((1:interval:A_size) .- 1)'
     quiver(σ_grid[:], A_grid[:], quiver = (scale .* dσdt[:], scale .* dAdt[:]), 
-        alpha = 0.5, color = "blue")
+        alpha = 0.5, color = "blue", aspect_ratio = :equal)
+    plot!(size = (600, 600))
 end
 
 """
@@ -300,7 +339,10 @@ find the fixed points
 by the criterion: local minimum of vector magnitude
 and local maximum of trajectory density
 """
-function find_fp(sol, stress_t, dt, β; smooth_size = 3, neighbor_size = 5, thres_v = 2e-3, thres_d = 1e-4)
+function find_fp(sol, stress_t, dt, β; smooth_size = 3, neighbor_size = 5, merge_size = 10,
+        thres_v = 2e-3, thres_d = 1e-4)
+    # merge_size is the max distance between density max & mag. min
+    
     # generate (magnitude of) vf, traj density
     dσdt, dAdt, magnitude, passage = vector_field(sol, stress_t, dt)
     
@@ -312,26 +354,37 @@ function find_fp(sol, stress_t, dt, β; smooth_size = 3, neighbor_size = 5, thre
     v_min = local_min_2d(ms, neighbor_size)
     d_min = local_min_2d(-ps, neighbor_size)
     
+    # apply the thresholds
+    len_traj = length(sol.t) - Int64(round(stress_t / dt))
+    v_min_filtered = v_min[[ i for i = 1:size(v_min, 1) 
+            if magnitude[v_min[i, :]...] < β * thres_v ], :]
+    d_min_filtered = d_min[[ i for i = 1:size(d_min, 1)
+            if passage[d_min[i, :]...] > len_traj * thres_d ], :]
+    
     # find intersect with tolerance
     # also the density has to be large enough, and vf small
     n_fp = 0
-    fp = zeros(max(size(d_min, 1), size(v_min, 1)), 2)    # initialize
-    # max distance between density max & mag. min
-    dist_tol = neighbor_size + 1
+    fp = zeros(max(size(d_min_filtered, 1), size(v_min_filtered, 1)), 2)    # initialize
+    
     # absolute value threshold
-    #thres_v = 1e-2
-    #thres_d = 1e-2
-    len_traj = length(sol.t) - Int64(round(stress_t / dt))
-    for i = 1:size(v_min, 1)
-        if magnitude[v_min[i, :]...] > β * thres_v ||
-            passage[v_min[i, :]...] < len_traj * thres_d
+    v_visited = [ false for i = 1:size(v_min_filtered, 1) ]
+    for i = 1:size(d_min_filtered, 1)
+        if magnitude[d_min_filtered[i, :]...] > β * thres_v ||
+            passage[d_min_filtered[i, :]...] < len_traj * thres_d
             continue
         end
-        for j = 1:size(d_min, 1)
-            dist = sqrt(sum((d_min[j, :] .- v_min[i, :]).^2))
-            if dist < dist_tol
+        for j = 1:size(v_min_filtered, 1)
+            if v_visited[j]    # cannot be revisited
+                continue
+            end
+            dist = sqrt(sum((v_min_filtered[j, :] .- d_min_filtered[i, :]).^2))
+            if dist <= merge_size
+                v_visited[j] = true
                 n_fp += 1
-                fp[n_fp, :] .= v_min[i, :]
+                # it's eclectic to use v_min over d_min
+                # pitfall! I went back to density extrema at some point
+                # seems a more robust choice
+                fp[n_fp, :] .= d_min_filtered[i, :]
                 break
             end
         end
@@ -339,17 +392,45 @@ function find_fp(sol, stress_t, dt, β; smooth_size = 3, neighbor_size = 5, thre
     
     fp = fp[1:n_fp, :]
     fp .-= 1    # convert index to # moleclues
-    return fp, v_min, d_min
+    return fp, v_min_filtered, d_min_filtered
 end
 
 """
 marking the fixed points on the vector field
 """
-function plot_vf_w_fp(dσdt, dAdt, fp; scale = 1.0, interval = 5, adaptive = true)
+function plot_vf_w_fp(dσdt, dAdt, fp; scale = 3.0, interval = 5, adaptive = true)
     plt = plot_vf(dσdt, dAdt, scale = scale, interval = interval, adaptive = adaptive)
 
     scatter!(plt, fp[:, 1], fp[:, 2], color = :green, markersize = 10, 
         markerstrokewidth = 0, label = "fixed points", legend = :topright)
+end
+
+"""
+plot the vector field and a stretch of phase path
+"""
+function plot_portrait(sol, dσdt, dAdt, fp; 
+        scale = 3.0, interval = 5, adaptive = true, path_len = 1000, path_step = 10)
+    # plot the vector field and stable fixed points
+    plt = plot_vf_w_fp(dσdt, dAdt, fp, 
+        scale = scale, interval = interval, adaptive = adaptive)
+    # phase path
+    ~, σ, A = interpret_sol(sol)
+    t_steps = length(A)    # total steps
+    from = Int64(round(t_steps / 2))    # assume stress time < 1/2 * total time
+    to = from + path_len - 1
+    arrow_int = 10    # interval between arrows
+    cur = from
+    next = cur + path_step * arrow_int
+    while next < to
+        plot!(plt, σ[cur:path_step:next], A[cur:path_step:next], 
+            color = :salmon, alpha = 0.33, linewidth = 4, 
+            label = :none, arrow = (:arrow, 0.5))
+        cur = next
+        next = cur + path_step * arrow_int
+    end
+    plot!(plt, σ[cur:path_step:to], A[cur:path_step:to], 
+        color = :salmon, alpha = 0.33, linewidth = 4, 
+        label = "Phase path", arrow = (:arrow, 0.5))    # the last stretch
 end
 
 function naive_smooth_2d(mat, smooth_size = 5)
@@ -372,16 +453,17 @@ find local minimum
 the result is given by a col of x and a col of y
 """
 function local_min_2d(mat, neighbor_size = 1)
+    half_neighbor_size = Int64(floor(neighbor_size/2))
     δ = 1e-6    # threshold for minimum
     n_min = 0
     x_idx = zeros(Int64, length(mat[:]))
     y_idx = zeros(Int64, length(mat[:]))
     for i = 1:size(mat)[1]
         for j = 1:size(mat)[2]
-            x_start = max(1, i - neighbor_size)
-            x_end = min(size(mat)[1], i + neighbor_size)
-            y_start = max(1, j - neighbor_size)
-            y_end = min(size(mat)[2], j + neighbor_size)
+            x_start = max(1, i + 1 - (neighbor_size - half_neighbor_size))
+            x_end = min(size(mat)[1], i + half_neighbor_size)
+            y_start = max(1, j + 1 - (neighbor_size - half_neighbor_size))
+            y_end = min(size(mat)[2], j + half_neighbor_size)
             sorted = sort(mat[x_start:x_end, y_start:y_end][:])
             # strictly greater than
             if sorted[1] == mat[i, j] && sorted[2] - mat[i, j] > δ * abs(mat[i, j])
@@ -399,12 +481,19 @@ end
 ####################
 # Classification
 ####################
-function classify_by_timetraj(sol, stress_t, dt, β, n; smooth_size = 3, neighbor_size = 5, 
-        thres_v = 2e-3, thres_d = 1e-4, thres_f = 1e-7, fluc_mult = 3, 
+"""
+Automatic classification according to
+the time-trajectory.
+The algorithm classifies trajectories of the 2-component
+model by its stable fixed points, and the "flow" betweeen them
+"""
+function classify_by_timetraj(sol, stress_t, dt, β, n; smooth_size = 3, neighbor_size = 5, merge_size = 10, 
+        thres_v = 2e-3, thres_d = 1e-4, thres_f = 1e-4, fluc_fp = 2, fluc_f = 2, thres_ft = 50,
         show_vf_plot = false, show_v_heatmap = false, show_p_heatmap = false, quiet = true)
     # find fixed points
+    # fp already the number of molecules: starts from 0
     fp, v_min, p_max = find_fp(sol, stress_t, dt, β; smooth_size = smooth_size, 
-        neighbor_size = neighbor_size, thres_v = thres_v, thres_d = thres_d)
+        neighbor_size = neighbor_size, merge_size = merge_size, thres_v = thres_v, thres_d = thres_d)
     
     # theoretical sqrt(Var(x)) / <x>
     fluc_level = sqrt(β / n)
@@ -414,45 +503,65 @@ function classify_by_timetraj(sol, stress_t, dt, β, n; smooth_size = 3, neighbo
     n_fp = size(fp, 1)
 
     # condition 2: # of fp below or above the noise level
-    is_small_fp = [fp[i, 1] < fluc_mult * fluc_level && 
-        fp[i, 2] < fluc_mult * fluc_level for i = 1:size(fp, 1)]
-    n_small_fp = sum(is_small_fp)
-    is_large_fp = [fp[i, 1] >= fluc_mult * fluc_level && 
-        fp[i, 2] >= fluc_mult * fluc_level for i = 1:size(fp, 1)]
+#     is_small_fp = [fp[i, 1] < fluc_fp * fluc_level && 
+#         fp[i, 2] < fluc_fp * fluc_level for i = 1:size(fp, 1)]
+#     n_small_fp = sum(is_small_fp)
+    is_large_fp = [fp[i, 1] >= fluc_fp * fluc_level && 
+        fp[i, 2] >= fluc_fp * fluc_level for i = 1:size(fp, 1)]
     n_large_fp = sum(is_large_fp)
+    n_small_fp = n_fp - n_large_fp    # either small or large
 
     # condition 3: flow passes the noise level?
     len_traj = length(sol.t) - Int64(round(stress_t / dt))
-    dσdt, dAdt, magnitude, passage = vector_field(sol, 200.0, 1.0)
-    fluc_level_int = Int64(round(fluc_level))
-    if size(magnitude, 2) <= fluc_mult * fluc_level_int
+    dσdt, dAdt, magnitude, passage = vector_field(sol, stress_t, 1.0)
+    # the flow threshold requires +1, since the index of matrix starts from 1
+    fluc_thres_int = Int64(round(fluc_f * fluc_level)) + 1
+    if size(passage, 2) <= fluc_thres_int
         reverse_flow = 0.0    # traj never reched 3 * fluc_level
     else
-        reverse_flow = mean(magnitude[
-                1:min(size(magnitude, 1), fluc_mult * fluc_level_int), fluc_mult * fluc_level_int])
+        reverse_flow = sum(passage[1:min(size(passage, 1), fluc_thres_int), 
+                fluc_thres_int]) / Int64(round(fluc_thres_int / dt))
     end
     has_reverse_flow = reverse_flow > len_traj * thres_f
-    if size(magnitude, 1) <= fluc_mult * fluc_level_int
+    if size(passage, 1) <= fluc_thres_int
         forward_flow = 0.0    # traj never reched 3 * fluc_level
     else
-        forward_flow = mean(magnitude[
-                fluc_mult * fluc_level_int, 1:min(size(magnitude, 2), fluc_mult * fluc_level_int)])
+        forward_flow = sum(passage[fluc_thres_int, 1:min(size(passage, 2), 
+                    fluc_thres_int)]) / Int64(round(fluc_thres_int / dt))
     end
     has_forward_flow = forward_flow > len_traj * thres_f
+#     println("rel. reverse flow: ", reverse_flow/len_traj,
+#         " rel. forward flow: ", forward_flow/len_traj)
+    # rescueing no expression/homo. activation without fps
+    p_sum_col = sum(passage, dims = 1)
+    p_sum_row = sum(passage, dims = 2)
+    p_center_x = sum([ p_sum_row[i] * i for i = 1:length(p_sum_row) ]) / sum(p_sum_row)
+    p_center_y = sum([ p_sum_col[i] * i for i = 1:length(p_sum_col) ]) / sum(p_sum_col)
+    p_center = (p_center_x, p_center_y)
+    is_large_center = p_center[1] > fluc_thres_int &&
+        p_center[2] > fluc_thres_int
+#     println("geometric center: ", p_center[1], ", ", p_center[2])
+    
+    # condition 4: resonance magnitude in the Fourier space
+    # additional condition to only oscillation
+    res_ratio, ~, ~ = ft_analysis(sol, stress_t, dt)
     
     # decide
     if n_fp == 0
-        if has_reverse_flow && has_forward_flow
-            regime = :oscillation
-        else
-            # noisy activation or no expression detected
-            # this is a bit sloppy
-            if size(magnitude, 1) < fluc_mult * fluc_level && size(magnitude, 2) < fluc_mult * fluc_level
-                regime = :no_expression
+        # was and before i.e. both flows required
+        if has_reverse_flow || has_forward_flow
+            if res_ratio > thres_ft
+                regime = :oscillation
             else
-                regime = :homo_activation
+                regime = :irregular_oscillation
             end
-#             regime = :undefined
+        else
+            # theoretically will not happen. for robustness
+            if is_large_center
+                regime = :homo_activation
+            else
+                regime = :no_expression
+            end
         end
     elseif n_fp == 1
         if n_small_fp == 1
@@ -461,22 +570,23 @@ function classify_by_timetraj(sol, stress_t, dt, β, n; smooth_size = 3, neighbo
             else
                 regime = :no_expression
             end
+        #elseif n_large_fp == 1
         else
-            if has_reverse_flow && has_forward_flow
+            if has_reverse_flow || has_forward_flow
                 regime = :stochastic_anti_pulsing
             else
                 regime = :homo_activation
             end
+        #else
+        #    regime = :undefined
         end
     elseif n_fp == 2
-        if n_small_fp == 1
-            if has_reverse_flow && has_forward_flow
-                regime = :stochastic_switching
-            else
-                regime = :het_activation
-            end
+        # we may check whether n_small_fp == 1
+        # but which will make trivial unknown behaviors
+        if has_reverse_flow || has_forward_flow
+            regime = :stochastic_switching
         else
-            regime = :undefined
+            regime = :het_activation
         end
     else
         regime = :undefined
@@ -492,19 +602,24 @@ function classify_by_timetraj(sol, stress_t, dt, β, n; smooth_size = 3, neighbo
     # plot
     if !quiet
         if(show_vf_plot)
-            display(plot_vf_w_fp(dσdt, dAdt, fp))
+            display(plot_portrait(sol, dσdt, dAdt, fp, scale = 2.0, 
+                    path_len = 500, path_step = 5))
         end
         if(show_v_heatmap)
-            display(heatmap_w_extrema(magnitude, v_min, fluc_mult * fluc_level))
+            # showing the demarcation for *fixed points*, not *flows*
+            display(heatmap_w_extrema(magnitude, v_min, fluc_fp * fluc_level))
         end
         if(show_p_heatmap)
-            display(heatmap_w_extrema(passage, p_max, fluc_mult * fluc_level))
+            display(heatmap_w_extrema(passage, p_max, fluc_fp * fluc_level))
         end
     end
     
     return regime
 end
 
+"""
+Plot heat map of VF with extrema
+"""
 function heatmap_w_extrema(magnitude, min_idx, noise_level)
     # min_idx is the index of extrema, the coord is min_idx - 1
     p_heatmap = heatmap(1:size(magnitude, 1), 1:size(magnitude, 2), magnitude')
@@ -514,4 +629,42 @@ function heatmap_w_extrema(magnitude, min_idx, noise_level)
         linestyle = :dash, legend = false)
     plt = plot!(plt, [noise_level], seriestype = "hline", color = "red", 
         linestyle = :dash, legend = false)
+end
+
+"""
+Fourier transformation of the amount of sigma factor
+to distinguish oscillation from other no-FP behaviors
+"""
+function ft_analysis(sol, stress_t, dt; show_plot = false)
+    max_t = 1e4    # constant, the range for analysis
+    
+    # interpret the solution
+    t, σ, ~ = interpret_sol(sol)
+    
+    # truncate
+    σ = σ[stress_t .< t .< max_t]
+    t = range(0.0, stop = (length(σ) - 1) * dt, length = length(σ))
+
+    # fourier transform
+    F = fft(σ) |> fftshift
+    freqs = fftfreq(length(t), 1.0/dt) |> fftshift
+
+    # plot
+    if show_plot
+        display(plot(freqs, abs.(F), xlim=(-0.5, 0.5)))
+    end
+    
+    # resonance to neighbour ratio
+    pos_freqs = freqs[freqs .> 1e-3]
+    pos_mag = abs.(F)[freqs .> 1e-3]
+    df = (maximum(freqs) - minimum(freqs)) / (length(freqs) - 1)
+    # ratio of resonance magnitude to its neighbour
+    which_max = argmax(pos_mag)
+    next_val = mean(pos_mag[(which_max + Int64(round(0.05 / df))):(which_max + Int64(round(0.15 / df)))])
+    res_ratio = maximum(pos_mag) / next_val
+    max_freq = pos_freqs[which_max]
+#     println("max ", maximum(pos_mag), " next ", next_val, " interval ", Int64(round(0.01 / df)))
+
+    # return
+    return res_ratio, F, freqs
 end
