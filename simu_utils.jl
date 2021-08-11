@@ -208,7 +208,7 @@ function S_step(step_time, step_value, p_idx)
 end
 
 "simulate with Gillespie"
-function simu_ssa(_m, tspan, u₀, p, stress_t; _saveat = 1., dual = true)
+function simu_ssa(_m, tspan, u₀, p, stress_t; _saveat = 1., dual = false)
     # dangerous! the index for KD is fixed!
     p_idx = dual ? [5, 7] : 4    # index of KD in p
     _KD = p[p_idx]
