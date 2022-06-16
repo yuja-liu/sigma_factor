@@ -513,7 +513,7 @@ function classify_by_timetraj(sol, stress_t, dt, β, n; smooth_size = 3, neighbo
 
     # condition 3: flow passes the noise level?
     len_traj = length(sol.t) - Int64(round(stress_t / dt))
-    dσdt, dAdt, magnitude, passage = vector_field(sol, stress_t, 1.0)
+    dσdt, dAdt, magnitude, passage = vector_field(sol, stress_t, dt)
     # the flow threshold requires +1, since the index of matrix starts from 1
     fluc_thres_int = Int64(round(fluc_f * fluc_level)) + 1
     if size(passage, 2) <= fluc_thres_int
