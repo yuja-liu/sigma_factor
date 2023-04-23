@@ -1,8 +1,5 @@
 # Modelling bacterial alternative sigma factors and their competition
 
-![bacteria cartoon](figures/cartoons/banner.jpg)
-
-The principle of the bacterial stress response circuit can be understood
-through the lens of *dynamical systems*.
-
-![purple bug](figures/cartoons/purple_1.jpg)
+This is the code for my [Master's thesis](https://github.com/yuja-liu/mphil_thesis),
+which shows that various dynamical behaviours of the alternative sigma factor are permitted by a simple stochastic
+model based on molecular details.
